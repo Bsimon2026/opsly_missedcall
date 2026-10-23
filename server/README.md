@@ -14,14 +14,16 @@ decides how the bot answers a customer. It runs on sample shop data in
 - Daily reply limit per customer number, to stop loops and spam.
 - Keeps the last 10 messages per customer and sends them to the AI with the shop's info.
 - Answers in the customer's language and only from the shop info.
-- The AI key stays in the server's environment. It is never in any app.
+- Works with DeepSeek or Anthropic. The AI key stays in the server's environment. It is never in any app.
 
 ## Setup (Node 20.6 or newer)
 
 1. Install Node.js from nodejs.org if you don't have it. Check with `node --version`.
-2. In this folder, copy `.env.example` to `.env` and put your AI key in it:
+2. In this folder (next to `server.js`), copy `.env.example` to `.env` and put your AI key in it.
+   DeepSeek and Anthropic keys are both supported; the server picks the provider from the key name:
 
-       ANTHROPIC_API_KEY=your-key
+       DEEPSEEK_API_KEY=your-key        (DeepSeek, default model deepseek-flash)
+       ANTHROPIC_API_KEY=your-key       (Anthropic, default model claude-haiku-5-5)
 
    Never share this file, and don't paste the key anywhere else.
 3. Start the server:

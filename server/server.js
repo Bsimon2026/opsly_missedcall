@@ -6,9 +6,17 @@ import http from 'node:http';
 import { readFileSync } from 'node:fs';
 
 const PORT = Number(process.env.PORT) || 3000;
-const MODEL = process.env.AI_MODEL || 'claude-haiku-5-5';
-const API_KEY = process.env.ANTHROPIC_API_KEY;
 const FAKE_AI = process.env.FAKE_AI === '1';
+
+// Which AI provider to use: set AI_PROVIDER=deepseek or anthropic, or let it pick
+// from whichever key is present (DEEPSEEK_API_KEY or ANTHROPIC_API_KEY).
+const PROVIDER =
+  process.env.AI_PROVIDER ||
+  (process.env.DEEPSEEK_API_KEY ? 'deepseek' : 'anthropic');
+const API_KEY =
+  PROVIDER === 'deepseek' ? process.env.DEEPSEEK_API_KEY : process.env.ANTHROPIC_API_KEY;
+const MODEL =
+  process.env.AI_MODEL || (PROVIDER === 'deepseek' ? 'deepseek-flash' : 'claude-haiku-5-5');
 
 const MAX_HISTORY = 10; // messages sent to the AI per customer
 const MAX_TOKENS = 300; // short replies keep cost low
@@ -25,7 +33,8 @@ const history = new Map(); // "license|number" -> [{ role, content }]
 const dailyCount = new Map(); // "license|number|YYYY-MM-DD" -> count
 
 if (!FAKE_AI && !API_KEY) {
-  console.error('ANTHROPIC_API_KEY is missing. Put it in .env (see .env.example), or run with FAKE_AI=1 to test without the AI.');
+  const name = PROVIDER === 'deepseek' ? 'DEEPSEEK_API_KEY' : 'ANTHROPIC_API_KEY';
+  console.error(`${name} is missing. Put it in .env next to server.js (see .env.example), or run with FAKE_AI=1 to test without the AI.`);
   process.exit(1);
 }
 
@@ -77,6 +86,10 @@ async function askAI(system, messages) {
     const last = messages[messages.length - 1].content;
     return `[fake reply] You said: ${last}`;
   }
+  return PROVIDER === 'deepseek' ? askDeepSeek(system, messages) : askAnthropic(system, messages);
+}
+
+async function askAnthropic(system, messages) {
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -88,11 +101,42 @@ async function askAI(system, messages) {
   });
   if (!r.ok) {
     const detail = await r.text();
-    throw new Error(`AI API ${r.status}: ${detail.slice(0, 300)}`);
+    throw new Error(`Anthropic API ${r.status}: ${detail.slice(0, 300)}`);
   }
   const data = await r.json();
   const text = data.content?.find((b) => b.type === 'text')?.text;
-  if (!text) throw new Error('AI API returned no text');
+  if (!text) throw new Error('Anthropic API returned no text');
+  return text.trim();
+}
+
+// DeepSeek uses the OpenAI-style chat completions format.
+async function askDeepSeek(system, messages) {
+  const base = {
+    model: MODEL,
+    max_tokens: MAX_TOKENS,
+    messages: [{ role: 'system', content: system }, ...messages],
+  };
+  const call = (body) =>
+    fetch('https://api.deepseek.com/chat/completions', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${API_KEY}`,
+      },
+      body: JSON.stringify(body),
+    });
+
+  // Thinking mode is slow and costs extra tokens, which a short shop reply does not need.
+  // If the API rejects the thinking field, retry once without it.
+  let r = await call({ ...base, thinking: { type: 'disabled' } });
+  if (r.status === 400) r = await call(base);
+  if (!r.ok) {
+    const detail = await r.text();
+    throw new Error(`DeepSeek API ${r.status}: ${detail.slice(0, 300)}`);
+  }
+  const data = await r.json();
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new Error('DeepSeek API returned no text');
   return text.trim();
 }
 
@@ -162,7 +206,7 @@ async function handleChat(body) {
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && req.url === '/health') {
-      return send(res, 200, { ok: true, fakeAi: FAKE_AI, model: MODEL });
+      return send(res, 200, { ok: true, fakeAi: FAKE_AI, provider: PROVIDER, model: MODEL });
     }
     if (req.method === 'POST' && req.url === '/chat') {
       const body = await readBody(req);
@@ -176,5 +220,5 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`Opsly365 server on http://localhost:${PORT}  (model ${MODEL}${FAKE_AI ? ', FAKE AI mode' : ''})`);
+  console.log(`Opsly365 server on http://localhost:${PORT}  (${PROVIDER}, model ${MODEL}${FAKE_AI ? ', FAKE AI mode' : ''})`);
 });
