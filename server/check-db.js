@@ -20,6 +20,19 @@ try {
   if (!client) bad++;
 } catch (err) {
   console.error('FAIL  could not reach the database:', err.message);
+  const cause = err.cause;
+  if (cause) {
+    console.error(`      reason: ${cause.code || cause.name || ''} ${cause.message || ''}`.trimEnd());
+    const hints = {
+      ERR_INVALID_URL: 'SUPABASE_URL is malformed. It should look like https://yourproject.supabase.co (no quotes, spaces or extra path).',
+      ENOTFOUND: 'The address could not be found. Check SUPABASE_URL for a typo, and check your internet connection.',
+      ECONNREFUSED: 'The connection was refused. A firewall, VPN or antivirus may be blocking Node.',
+      ECONNRESET: 'The connection was reset. A firewall, VPN, proxy or antivirus may be interfering.',
+      UND_ERR_CONNECT_TIMEOUT: 'The connection timed out. Check your internet, VPN or firewall.',
+    };
+    if (hints[cause.code]) console.error(`      hint: ${hints[cause.code]}`);
+  }
+  console.error(`      using URL: ${process.env.SUPABASE_URL}`); // the URL is not secret; the key is never printed
   bad++;
 }
 console.log(bad === 0 ? '\nDatabase is ready.' : `\n${bad} problem(s). Fix them, then run this again.`);
