@@ -1,0 +1,13 @@
+{
+  "name": "opsly365-phase1",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Phase 1: cloud /chat endpoint and bot test script",
+  "engines": { "node": ">=20.6" },
+  "scripts": {
+    "start": "node --env-file=.env server.js",
+    "start:fake": "FAKE_AI=1 node server.js",
+    "test": "node test-chat.js"
+  }
+}
