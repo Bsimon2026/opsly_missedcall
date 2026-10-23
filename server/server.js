@@ -1,9 +1,10 @@
-// Opsly365 phase 1: the cloud /chat endpoint.
-// Data lives in data/clients.json and in memory for now; phase 1b moves it to Supabase.
-// The AI key is read from the environment and never leaves this server.
+// Opsly365: the cloud /chat endpoint.
+// Data comes from Supabase when SUPABASE_URL and SUPABASE_SERVICE_KEY are set,
+// otherwise from data/clients.json and memory (see store.js).
+// The AI key and the database key are read from the environment and never leave this server.
 
 import http from 'node:http';
-import { readFileSync } from 'node:fs';
+import { store, STORE_KIND } from './store.js';
 
 const PORT = Number(process.env.PORT) || 3000;
 const FAKE_AI = process.env.FAKE_AI === '1';
@@ -23,15 +24,6 @@ const MAX_TOKENS = 300; // short replies keep cost low
 const DAILY_LIMIT_PER_NUMBER = 20; // loop and spam protection
 const PERSON_WORDS = new Set(['PERSON', 'HUMAN', 'AGENT']);
 
-const clients = JSON.parse(
-  readFileSync(new URL('./data/clients.json', import.meta.url), 'utf8')
-);
-
-// In-memory state (phase 1b replaces these with database tables)
-const chatsThisMonth = new Map(); // license_key -> count
-const history = new Map(); // "license|number" -> [{ role, content }]
-const dailyCount = new Map(); // "license|number|YYYY-MM-DD" -> count
-
 if (!FAKE_AI && !API_KEY) {
   const name = PROVIDER === 'deepseek' ? 'DEEPSEEK_API_KEY' : 'ANTHROPIC_API_KEY';
   console.error(`${name} is missing. Put it in .env next to server.js (see .env.example), or run with FAKE_AI=1 to test without the AI.`);
@@ -49,7 +41,7 @@ function readBody(req) {
     req.on('data', (chunk) => {
       data += chunk;
       if (data.length > 20_000) {
-        reject(new Error('body too large'));
+        reject(Object.assign(new Error('body too large'), { status: 400 }));
         req.destroy();
       }
     });
@@ -57,7 +49,7 @@ function readBody(req) {
       try {
         resolve(JSON.parse(data || '{}'));
       } catch {
-        reject(new Error('invalid json'));
+        reject(Object.assign(new Error('invalid json'), { status: 400 }));
       }
     });
     req.on('error', reject);
@@ -146,7 +138,7 @@ async function handleChat(body) {
     return [400, { error: 'licenseKey, customerNumber and message are required' }];
   }
 
-  const client = clients.find((c) => c.license_key === licenseKey);
+  const client = await store.getClient(licenseKey);
   if (!client) return [401, { error: 'unknown license' }];
 
   // Payment check comes first: a suspended client gets nothing.
@@ -157,9 +149,25 @@ async function handleChat(body) {
   const number = String(customerNumber).replace(/\D/g, '');
   const text = message.trim().slice(0, 1000);
 
+  const known = await store.getNumber(client, number);
+
   // Ignored numbers: no reply, no AI cost.
-  if (client.ignored.includes(number)) {
+  if (known?.status === 'ignored') {
     return [200, { reply: null, reason: 'ignored' }];
+  }
+
+  // The owner took over this chat: the bot stays quiet until the pause ends.
+  if (known?.bot_paused_until && new Date(known.bot_paused_until) > new Date()) {
+    return [200, { reply: null, reason: 'owner took over' }];
+  }
+
+  // A number we have not seen starts as a customer, unless the owner turned that off.
+  // ("business_hours" mode is added with the dashboard settings; it behaves like "always" for now.)
+  if (!known) {
+    if (client.unknown_message_mode === 'never') {
+      return [200, { reply: null, reason: 'new numbers are switched off' }];
+    }
+    await store.addCustomer(client, number, 'first_message');
   }
 
   // Customer asks for a person: hand over to the owner.
@@ -171,22 +179,18 @@ async function handleChat(body) {
   }
 
   // Loop and spam protection per number per day.
-  const day = new Date().toISOString().slice(0, 10);
-  const dayKey = `${licenseKey}|${number}|${day}`;
-  const todayCount = dailyCount.get(dayKey) || 0;
-  if (todayCount >= DAILY_LIMIT_PER_NUMBER) {
+  if ((await store.countRepliesToday(client, number)) >= DAILY_LIMIT_PER_NUMBER) {
     return [200, { reply: null, reason: 'daily limit for this number' }];
   }
 
   // Monthly chat cap: fixed reply, no AI cost.
-  const used = chatsThisMonth.get(licenseKey) || 0;
+  const used = await store.chatsUsed(client);
   if (used >= client.chat_cap) {
     return [200, { reply: client.fallback_message || null, reason: 'monthly cap reached' }];
   }
 
-  const histKey = `${licenseKey}|${number}`;
-  const past = history.get(histKey) || [];
-  const messages = [...past.slice(-MAX_HISTORY), { role: 'user', content: text }];
+  const past = await store.getHistory(client, number, MAX_HISTORY);
+  const messages = [...past, { role: 'user', content: text }];
 
   let reply;
   try {
@@ -196,17 +200,15 @@ async function handleChat(body) {
     return [200, { reply: client.fallback_message || null, reason: 'ai error' }];
   }
 
-  history.set(histKey, [...messages, { role: 'assistant', content: reply }].slice(-MAX_HISTORY * 2));
-  chatsThisMonth.set(licenseKey, used + 1);
-  dailyCount.set(dayKey, todayCount + 1);
+  const chatsUsed = await store.recordExchange(client, number, text, reply);
 
-  return [200, { reply, handoff: false, chatsUsed: used + 1, chatCap: client.chat_cap }];
+  return [200, { reply, handoff: false, chatsUsed, chatCap: client.chat_cap }];
 }
 
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && req.url === '/health') {
-      return send(res, 200, { ok: true, fakeAi: FAKE_AI, provider: PROVIDER, model: MODEL });
+      return send(res, 200, { ok: true, fakeAi: FAKE_AI, provider: PROVIDER, model: MODEL, store: STORE_KIND });
     }
     if (req.method === 'POST' && req.url === '/chat') {
       const body = await readBody(req);
@@ -215,10 +217,13 @@ const server = http.createServer(async (req, res) => {
     }
     send(res, 404, { error: 'not found' });
   } catch (err) {
-    send(res, 400, { error: err.message });
+    if (err.status === 400) return send(res, 400, { error: err.message });
+    // Anything else (for example the database being unreachable): tell the caller to retry later.
+    console.error('Request failed:', err.message);
+    send(res, 503, { error: 'temporarily unavailable, try again' });
   }
 });
 
 server.listen(PORT, () => {
-  console.log(`Opsly365 server on http://localhost:${PORT}  (${PROVIDER}, model ${MODEL}${FAKE_AI ? ', FAKE AI mode' : ''})`);
+  console.log(`Opsly365 server on http://localhost:${PORT}  (${PROVIDER}, model ${MODEL}, ${STORE_KIND} store${FAKE_AI ? ', FAKE AI mode' : ''})`);
 });

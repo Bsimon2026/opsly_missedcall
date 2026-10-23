@@ -1,61 +1,40 @@
-# Opsly365 - Phase 1: /chat server and bot test
+# Opsly365 - server (/chat endpoint and database)
 
-This is the first piece of the missed-call WhatsApp product: the cloud endpoint that
-decides how the bot answers a customer. It runs on sample shop data in
-`data/clients.json`. Supabase (the real database) comes in phase 1b.
+The cloud part of the missed-call WhatsApp product: it decides how the bot answers a
+customer, keeps every client's data in Supabase, and enforces licence and payment status.
 
 ## What it does
 
 - `POST /chat` takes a license key, customer number and message, and returns the reply.
 - Checks the client's payment status first. A suspended client gets nothing.
-- Skips numbers on the client's Ignored list (no reply, no AI cost).
-- Typing PERSON hands the chat to the owner.
-- Monthly chat cap per client, with a fixed fallback reply once it is reached.
-- Daily reply limit per customer number, to stop loops and spam.
+- Skips Ignored numbers (no reply, no AI cost). A number it has not seen becomes a Customer.
+- Typing PERSON hands the chat to the owner. A paused chat stays quiet until the pause ends.
+- Monthly chat cap per client with a fixed fallback reply, and a daily limit per customer number.
 - Keeps the last 10 messages per customer and sends them to the AI with the shop's info.
-- Answers in the customer's language and only from the shop info.
-- Works with DeepSeek or Anthropic. The AI key stays in the server's environment. It is never in any app.
+- Works with DeepSeek or Anthropic. AI and database keys stay in the server's environment.
 
 ## Setup (Node 20.6 or newer)
 
-1. Install Node.js from nodejs.org if you don't have it. Check with `node --version`.
-2. In this folder (next to `server.js`), copy `.env.example` to `.env` and put your AI key in it.
-   DeepSeek and Anthropic keys are both supported; the server picks the provider from the key name:
+1. **Database.** In Supabase: SQL Editor, New query, paste all of `db/schema.sql`, Run.
+   It is safe to run again. It also creates three TEST clients (delete them before real clients).
+2. **Keys.** Copy `.env.example` to `.env` next to `server.js` and fill in:
+   - one AI key (`DEEPSEEK_API_KEY` or `ANTHROPIC_API_KEY`)
+   - `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` (the *secret* key, never the publishable one)
+3. **Check the database:** `npm run check-db` should end with "Database is ready."
+4. **Start:** `npm start`. The startup line shows the AI provider and `supabase store`.
+5. **Test** in a second terminal: `npm test`. Part 1 prints PASS/FAIL for the rules;
+   Part 2 prints the bot's replies to seven sample messages.
 
-       DEEPSEEK_API_KEY=your-key        (DeepSeek, default model deepseek-flash)
-       ANTHROPIC_API_KEY=your-key       (Anthropic, default model claude-haiku-5-5)
+Without Supabase keys the server falls back to `data/clients.json` and memory (resets on restart).
+To test the plumbing without any AI key: set `FAKE_AI=1` (PowerShell: `$env:FAKE_AI=1; node server.js`).
 
-   Never share this file, and don't paste the key anywhere else.
-3. Start the server:
+## Security model
 
-       npm start
-
-4. In a second terminal, run the test:
-
-       npm test
-
-   Part 1 prints PASS/FAIL for the rules. Part 2 prints the bot's answers to seven
-   sample customer messages (price, hours, an unknown product, Arabic, Malayalam,
-   a prompt-injection attempt, a booking request). Read these and tell me what to change.
-
-To test the plumbing without spending anything or needing a key:
-
-    npm run start:fake     (then npm test in a second terminal)
-
-## Editing the sample shop
-
-Open `data/clients.json`. `shop_info` is everything the bot knows. Replace the sample
-text with a real shop's hours, prices and FAQs. There is no model training: the
-bot reads this text on every chat.
-
-## Limits of this version
-
-- State (chat counts, history) is in memory and resets when the server restarts.
-- No login, no dashboard, no call handling yet.
-- Cost control is the chat cap, the 10-message history and the 300-token reply limit.
-  Set a monthly spend limit in your AI account as well.
+Every table has Row Level Security on and no policies, and the public and logged-in roles
+have no access. Only the server, using the secret key, can read or write. The Android app,
+the desktop app and the dashboard never talk to the database directly.
 
 ## Next
 
-Phase 1b: move clients, numbers, messages and payments into Supabase.
-Phase 2: Android call reporter. Phase 3: Windows desktop app.
+Phase 2: Android call reporter (POST /calls). Phase 3: Windows desktop app and /outbox.
+Phase 4: dashboard and admin page.
